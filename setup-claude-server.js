@@ -1,4 +1,6 @@
 import { homedir, platform } from 'os';
+import fs from 'fs/promises';
+import path from 'path';
 import { join } from 'path';
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -28,6 +30,96 @@ try {
 // Setup tracking
 let setupSteps = []; // Track setup progress
 let setupStartTime = Date.now();
+
+/**
+   * Initialize configuration - load from disk or create default
+   */
+async function initConfigFile() {
+    const USER_HOME = homedir();
+    const CONFIG_DIR = path.join(USER_HOME, '.claude-server-commander');
+
+    // Paths relative to the config directory
+    const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+    try {
+        // Ensure config directory exists
+        const configDir = path.dirname(CONFIG_FILE);
+        if (!existsSync(configDir)) {
+            mkdirSync(configDir, { recursive: true });
+        }
+
+        // Check if config file exists
+        try {
+            await fs.access(CONFIG_FILE);
+            // Load existing config
+            const configData = await fs.readFile(CONFIG_FILE, 'utf8');
+        } catch (error) {
+            const defaultConfig = {
+                blockedCommands: [
+
+                    // Disk and partition management
+                    "mkfs",      // Create a filesystem on a device
+                    "format",    // Format a storage device (cross-platform)
+                    "mount",     // Mount a filesystem
+                    "umount",    // Unmount a filesystem
+                    "fdisk",     // Manipulate disk partition tables
+                    "dd",        // Convert and copy files, can write directly to disks
+                    "parted",    // Disk partition manipulator
+                    "diskpart",  // Windows disk partitioning utility
+                    
+                    // System administration and user management
+                    "sudo",      // Execute command as superuser
+                    "su",        // Substitute user identity
+                    "passwd",    // Change user password
+                    "adduser",   // Add a user to the system
+                    "useradd",   // Create a new user
+                    "usermod",   // Modify user account
+                    "groupadd",  // Create a new group
+                    "chsh",      // Change login shell
+                    "visudo",    // Edit the sudoers file
+                    
+                    // System control
+                    "shutdown",  // Shutdown the system
+                    "reboot",    // Restart the system
+                    "halt",      // Stop the system
+                    "poweroff",  // Power off the system
+                    "init",      // Change system runlevel
+                    
+                    // Network and security
+                    "iptables",  // Linux firewall administration
+                    "firewall",  // Generic firewall command
+                    "netsh",     // Windows network configuration
+                    
+                    // Windows system commands
+                    "sfc",       // System File Checker
+                    "bcdedit",   // Boot Configuration Data editor
+                    "reg",       // Windows registry editor
+                    "net",       // Network/user/service management
+                    "sc",        // Service Control manager
+                    "runas",     // Execute command as another user
+                    "cipher",    // Encrypt/decrypt files or wipe data
+                    "takeown"    // Take ownership of files
+                ],
+                clientId: uniqueUserId, // Use the generated UUID as client ID
+                defaultShell: platform() === 'win32' ? 'powershell.exe' : '/bin/sh',
+                allowedDirectories: [],
+                telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
+                fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
+                fileReadLineLimit: 1000  // Default line limit for file read operations (changed from character-based)
+            };
+            logToFile('User id ' + uniqueUserId);
+            try {
+                await fs.writeFile(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2), 'utf8');
+            } catch (error) {
+                console.error('Failed to save config:', error);
+                throw error;
+            }
+        }
+
+    } catch (error) {
+        console.error('Failed to initialize config:', error);
+    }
+}
+
 
 
 // Function to get npm version
@@ -114,13 +206,44 @@ function detectShell() {
   return 'unknown-shell';
 }
 
+// Function to get the package spec that was used to run this script
+function getPackageSpec(versionArg = null) {
+  // If explicit version/tag argument provided, use it
+  // Usage: npx @wonderwhy-er/desktop-commander setup alpha
+  if (versionArg) {
+    return `@wonderwhy-er/desktop-commander@${versionArg}`;
+  }
+  
+  // Check if running via npx - look for the package spec in process.argv
+  // e.g., npx @wonderwhy-er/desktop-commander@0.2.18-alpha setup
+  const argv = process.argv;
+  
+  // Look for the package name in argv
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.includes('@wonderwhy-er/desktop-commander')) {
+      // Extract just the package spec (e.g., @wonderwhy-er/desktop-commander@0.2.18-alpha)
+      const match = arg.match(/(@wonderwhy-er\/desktop-commander(@[^\/\s]+)?)/);
+      if (match) {
+        return match[1];
+      }
+    }
+  }
+  
+  // Fallback to @latest if we can't detect
+  return '@wonderwhy-er/desktop-commander@latest';
+}
+
+function isNPX() {
+    return process.env.npm_lifecycle_event === 'npx' ||
+        process.env.npm_execpath?.includes('npx') ||
+        process.env._?.includes('npx') ||
+        import.meta.url.includes('node_modules');
+}
 // Function to determine execution context
 function getExecutionContext() {
   // Check if running from npx
-  const isNpx = process.env.npm_lifecycle_event === 'npx' ||
-                process.env.npm_execpath?.includes('npx') ||
-                process.env._?.includes('npx') ||
-                import.meta.url.includes('node_modules');
+  const isNpx = isNPX();
 
   // Check if installed globally
   const isGlobal = process.env.npm_config_global === 'true' ||
@@ -488,7 +611,17 @@ async function restartClaude() {
             logToFile('\nThe server is available as "desktop-commander" in Claude\'s MCP server list');
             
             logToFile("Future updates will install automatically — no need to run this setup again.\n\n");
-            logToFile("💬 Need help or found an issue? Join our community: https://discord.com/invite/kQ27sNnZr7\n\n")
+            logToFile("🤔 Need help or have feedback? Happy to jump on a quick call: \n\n")
+            logToFile("https://calendar.app.google/SHMNZN5MJznJWC5A7 \n\n")
+            logToFile("or join our community: https://discord.com/invite/kQ27sNnZr7\n\n")
+
+
+            
+
+
+
+
+
             updateSetupStep(restartStep, 'completed');
             await trackEvent('npx_setup_restart_claude_success', { platform });
         } catch (startError) {
@@ -510,6 +643,9 @@ async function restartClaude() {
 
 // Main function to export for ESM compatibility
 export default async function setup() {
+    // Parse command line arguments for version/tag
+    const versionArg = process.argv[3]; // argv[0]=node, argv[1]=script, argv[2]=version/tag
+
     // Add tracking for setup function entry
     await trackEvent('npx_setup_function_started');
 
@@ -532,6 +668,7 @@ export default async function setup() {
     }
 
     try {
+        await initConfigFile();
         // Check if config directory exists and create it if necessary
         const configDirStep = addSetupStep('check_config_directory');
         const configDir = dirname(claudeConfigPath);
@@ -607,7 +744,7 @@ export default async function setup() {
         const configPrepStep = addSetupStep('prepare_server_config');
 
         // Determine if running through npx or locally
-        const isNpx = import.meta.url.includes('node_modules');
+        const isNpx = isNPX();
         await trackEvent('npx_setup_execution_mode', { isNpx });
 
         // Fix Windows path handling for npx execution
@@ -620,23 +757,35 @@ export default async function setup() {
                     // Debug with npx
                     logToFile('Setting up debug configuration with npx. The process will pause on start until a debugger connects.');
                     // Add environment variables to help with debugging
+                    // Inspector flag must be in NODE_OPTIONS, not passed as npx argument
                     const debugEnv = {
-                        "NODE_OPTIONS": "--trace-warnings --trace-exit",
+                        "NODE_OPTIONS": "--inspect-brk=9229 --trace-warnings --trace-exit",
                         "DEBUG": "*"
                     };
 
-                    serverConfig = {
-                        "command": isWindows ? "node.exe" : "node",
-                        "args": [
-                            "--inspect-brk=9229",
-                            isWindows ?
-                                join(process.env.APPDATA || '', "npm", "npx.cmd").replace(/\\/g, '\\\\') :
-                                "$(which npx)",
-                            "@wonderwhy-er/desktop-commander@latest"
-                        ],
-                        "env": debugEnv
-                    };
-                    await trackEvent('npx_setup_config_debug_npx');
+                    const packageSpec = getPackageSpec(versionArg);
+                    
+                    // Windows requires cmd /c wrapper for npx
+                    if (isWindows) {
+                        serverConfig = {
+                            "command": "cmd",
+                            "args": [
+                                "/c",
+                                "npx",
+                                packageSpec
+                            ],
+                            "env": debugEnv
+                        };
+                    } else {
+                        serverConfig = {
+                            "command": "npx",
+                            "args": [
+                                packageSpec
+                            ],
+                            "env": debugEnv
+                        };
+                    }
+                    await trackEvent('npx_setup_config_debug_npx', { packageSpec });
                 } else {
                     // Debug with local installation path
                     const indexPath = join(__dirname, 'dist', 'index.js');
@@ -660,13 +809,29 @@ export default async function setup() {
             } else {
                 // Standard configuration without debug
                 if (isNpx) {
-                    serverConfig = {
-                        "command": isWindows ? "npx.cmd" : "npx",
-                        "args": [
-                            "@wonderwhy-er/desktop-commander@latest"
-                        ]
-                    };
-                    await trackEvent('npx_setup_config_standard_npx');
+                    const packageSpec = getPackageSpec(versionArg);
+                    
+                    // Windows requires cmd /c wrapper for npx
+                    if (isWindows) {
+                        serverConfig = {
+                            "command": "cmd",
+                            "args": [
+                                "/c",
+                                "npx",
+                                "-y",
+                                packageSpec
+                            ]
+                        };
+                    } else {
+                        serverConfig = {
+                            "command": "npx",
+                            "args": [
+                                "-y",
+                                packageSpec
+                            ]
+                        };
+                    }
+                    await trackEvent('npx_setup_config_standard_npx', { packageSpec });
                 } else {
                     // For local installation, use absolute path to handle Windows properly
                     const indexPath = join(__dirname, 'dist', 'index.js');

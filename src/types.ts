@@ -1,8 +1,10 @@
 import { ChildProcess } from 'child_process';
 import { FilteredStdioServerTransport } from './custom-stdio.js';
+import type { PreviewFileType } from './ui/file-preview/shared/preview-file-types.js';
 
 declare global {
   var mcpTransport: FilteredStdioServerTransport | undefined;
+  var disableOnboarding: boolean | undefined;
 }
 
 export interface ProcessInfo {
@@ -15,7 +17,8 @@ export interface ProcessInfo {
 export interface TerminalSession {
   pid: number;
   process: ChildProcess;
-  lastOutput: string;
+  outputLines: string[];      // Line-based buffer (persistent)
+  lastReadIndex: number;      // Track where "new" output starts for default reads
   isBlocked: boolean;
   startTime: Date;
 }
@@ -24,6 +27,27 @@ export interface CommandExecutionResult {
   pid: number;
   output: string;
   isBlocked: boolean;
+  timingInfo?: TimingInfo;
+}
+
+export interface TimingInfo {
+  startTime: number;
+  endTime: number;
+  totalDurationMs: number;
+  exitReason: 'early_exit_quick_pattern' | 'early_exit_periodic_check' | 'process_exit' | 'timeout';
+  firstOutputTime?: number;
+  lastOutputTime?: number;
+  timeToFirstOutputMs?: number;
+  outputEvents?: OutputEvent[];
+}
+
+export interface OutputEvent {
+  timestamp: number;
+  deltaMs: number;
+  source: 'stdout' | 'stderr';
+  length: number;
+  snippet: string;
+  matchedPattern?: string;
 }
 
 export interface ActiveSession {
@@ -48,8 +72,18 @@ export interface ServerResponseContent {
   mimeType?: string;
 }
 
+export interface FilePreviewStructuredContent {
+  fileName: string;
+  filePath: string;
+  fileType: PreviewFileType;
+  content?: string;
+  imageData?: string;
+  mimeType?: string;
+}
+
 export interface ServerResult {
   content: ServerResponseContent[];
+  structuredContent?: FilePreviewStructuredContent | Record<string, unknown>;
   isError?: boolean;
   _meta?: Record<string, unknown>;
 }

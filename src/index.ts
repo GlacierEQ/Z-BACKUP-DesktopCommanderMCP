@@ -1,51 +1,21 @@
 #!/usr/bin/env node
 
 import { FilteredStdioServerTransport } from './custom-stdio.js';
-import { server } from './server.js';
+import { server, flushDeferredMessages } from './server.js';
 import { commandManager } from './command-manager.js';
 import { configManager } from './config-manager.js';
-import { join, dirname } from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
-import { platform } from 'os';
+import { featureFlagManager } from './utils/feature-flags.js';
+import { runSetup } from './npm-scripts/setup.js';
+import { runUninstall } from './npm-scripts/uninstall.js';
 import { capture } from './utils/capture.js';
+import { logToStderr, logger } from './utils/logger.js';
+import { runRemote } from './npm-scripts/remote.js';
+import { ensureChromeAvailable } from './tools/pdf/markdown.js';
 
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const isWindows = platform() === 'win32';
-
-// Helper function to properly convert file paths to URLs, especially for Windows
-function createFileURL(filePath: string): URL {
-  if (isWindows) {
-    // Ensure path uses forward slashes for URL format
-    const normalizedPath = filePath.replace(/\\/g, '/');
-    // Ensure path has proper file:// prefix
-    if (normalizedPath.startsWith('/')) {
-      return new URL(`file://${normalizedPath}`);
-    } else {
-      return new URL(`file:///${normalizedPath}`);
-    }
-  } else {
-    // For non-Windows, we can use the built-in function
-    return pathToFileURL(filePath);
-  }
-}
-
-async function runSetup() {
-  try {
-    // Fix for Windows ESM path issue
-    const setupScriptPath = join(__dirname, 'setup-claude-server.js');
-    const setupScriptUrl = createFileURL(setupScriptPath);
-
-    // Now import using the URL format
-    const { default: setupModule } = await import(setupScriptUrl.href);
-    if (typeof setupModule === 'function') {
-      await setupModule();
-    }
-  } catch (error) {
-    console.error('Error running setup:', error);
-    process.exit(1);
-  }
+// Store messages to defer until after initialization
+const deferredMessages: Array<{ level: string, message: string }> = [];
+function deferLog(level: string, message: string) {
+  deferredMessages.push({ level, message });
 }
 
 async function runServer() {
@@ -56,19 +26,58 @@ async function runServer() {
       return;
     }
 
+    // Check if first argument is "remove"
+    if (process.argv[2] === 'remove') {
+      await runUninstall();
+      return;
+    }
 
+    // Check if first argument is "remote"
+    if (process.argv[2] === 'remote') {
+      await runRemote();
+      return;
+    }
 
+    // Parse command line arguments for onboarding control
+    const DISABLE_ONBOARDING = process.argv.includes('--no-onboarding');
+    if (DISABLE_ONBOARDING) {
+      logToStderr('info', 'Onboarding disabled via --no-onboarding flag');
+    }
+
+    // Set global flag for onboarding control
+    (global as any).disableOnboarding = DISABLE_ONBOARDING;
+
+    // Create transport FIRST so all logging gets properly buffered
+    // This must happen before any code that might use logger.*
     const transport = new FilteredStdioServerTransport();
-    
+
     // Export transport for use throughout the application
     global.mcpTransport = transport;
+
+    try {
+      deferLog('info', 'Loading configuration...');
+      await configManager.loadConfig();
+      deferLog('info', 'Configuration loaded successfully');
+
+      // Initialize feature flags (non-blocking)
+      deferLog('info', 'Initializing feature flags...');
+      await featureFlagManager.initialize();
+    } catch (configError) {
+      deferLog('error', `Failed to load configuration: ${configError instanceof Error ? configError.message : String(configError)}`);
+      if (configError instanceof Error && configError.stack) {
+        deferLog('debug', `Stack trace: ${configError.stack}`);
+      }
+      deferLog('warning', 'Continuing with in-memory configuration only');
+      // Continue anyway - we'll use an in-memory config
+    }
+
     // Handle uncaught exceptions
     process.on('uncaughtException', async (error) => {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
       // If this is a JSON parsing error, log it to stderr but don't crash
       if (errorMessage.includes('JSON') && errorMessage.includes('Unexpected token')) {
-        process.stderr.write(`[desktop-commander] JSON parsing error: ${errorMessage}\n`);
+        logger.error(`JSON parsing error: ${errorMessage}`);
         return; // Don't exit on JSON parsing errors
       }
 
@@ -76,7 +85,7 @@ async function runServer() {
         error: errorMessage
       });
 
-      process.stderr.write(`[desktop-commander] Uncaught exception: ${errorMessage}\n`);
+      logger.error(`Uncaught exception: ${errorMessage}`);
       process.exit(1);
     });
 
@@ -86,7 +95,7 @@ async function runServer() {
 
       // If this is a JSON parsing error, log it to stderr but don't crash
       if (errorMessage.includes('JSON') && errorMessage.includes('Unexpected token')) {
-        process.stderr.write(`[desktop-commander] JSON parsing rejection: ${errorMessage}\n`);
+        logger.error(`JSON parsing rejection: ${errorMessage}`);
         return; // Don't exit on JSON parsing errors
       }
 
@@ -94,36 +103,54 @@ async function runServer() {
         error: errorMessage
       });
 
-      process.stderr.write(`[desktop-commander] Unhandled rejection: ${errorMessage}\n`);
+      logger.error(`Unhandled rejection: ${errorMessage}`);
       process.exit(1);
     });
 
     capture('run_server_start');
 
-    try {
-      console.error("Loading configuration...");
-      await configManager.loadConfig();
-      console.error("Configuration loaded successfully");
-    } catch (configError) {
-      console.error(`Failed to load configuration: ${configError instanceof Error ? configError.message : String(configError)}`);
-      console.error(configError instanceof Error && configError.stack ? configError.stack : 'No stack trace available');
-      console.error("Continuing with in-memory configuration only");
-      // Continue anyway - we'll use an in-memory config
-    }
+    deferLog('info', 'Connecting server...');
 
+    // Set up event-driven initialization completion handler
+    server.oninitialized = () => {
+      // This callback is triggered after the client sends the "initialized" notification
+      // At this point, the MCP protocol handshake is fully complete
+      transport.enableNotifications();
 
-    console.error("Connecting server...");
+      // Flush all deferred messages from both index.ts and server.ts
+      while (deferredMessages.length > 0) {
+        const msg = deferredMessages.shift()!;
+        transport.sendLog('info', msg.message);
+      }
+      flushDeferredMessages();
+
+      // Now we can send regular logging messages
+      transport.sendLog('info', 'Server connected successfully');
+      transport.sendLog('info', 'MCP fully initialized, all startup messages sent');
+
+      // Preemptively check/download Chrome for PDF generation (runs in background)
+      ensureChromeAvailable();
+    };
+
     await server.connect(transport);
-    console.error("Server connected successfully");
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`FATAL ERROR: ${errorMessage}`);
-    console.error(error instanceof Error && error.stack ? error.stack : 'No stack trace available');
-    process.stderr.write(JSON.stringify({
-      type: 'error',
-      timestamp: new Date().toISOString(),
-      message: `Failed to start server: ${errorMessage}`
-    }) + '\n');
+    logger.error(`FATAL ERROR: ${errorMessage}`);
+    if (error instanceof Error && error.stack) {
+      logger.debug(error.stack);
+    }
+
+    // Send a structured error notification
+    const errorNotification = {
+      jsonrpc: "2.0" as const,
+      method: "notifications/message",
+      params: {
+        level: "error",
+        logger: "desktop-commander",
+        data: `Failed to start server: ${errorMessage} (${new Date().toISOString()})`
+      }
+    };
+    process.stdout.write(JSON.stringify(errorNotification) + '\n');
 
     capture('run_server_failed_start_error', {
       error: errorMessage

@@ -15,12 +15,33 @@ export interface ServerConfig {
   fileReadLineLimit?: number; // Default line limit for file read operations (changed from character-based)
   clientId?: string; // Unique client identifier for analytics
   currentClient?: ClientInfo; // Current connected client information
-  [key: string]: any; // Allow for arbitrary configuration keys
+  [key: string]: any; // Allow for arbitrary configuration keys (including abTest_* keys)
 }
 
 export interface ClientInfo {
   name: string;
   version: string;
+}
+
+export function normalizeTelemetryEnabledValue(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+
+  if (normalized === 'false') {
+    return false;
+  }
+
+  return value;
+}
+
+export function isTelemetryDisabledValue(value: unknown): boolean {
+  return normalizeTelemetryEnabledValue(value) === false;
 }
 
 /**
@@ -30,6 +51,7 @@ class ConfigManager {
   private configPath: string;
   private config: ServerConfig = {};
   private initialized = false;
+  private _isFirstRun = false; // Track if this is the first run (config was just created)
 
   constructor() {
     // Get user's home directory
@@ -56,9 +78,11 @@ class ConfigManager {
         // Load existing config
         const configData = await fs.readFile(this.configPath, 'utf8');
         this.config = JSON.parse(configData);
+        this._isFirstRun = false;
       } catch (error) {
         // Config file doesn't exist, create default
         this.config = this.getDefaultConfig();
+        this._isFirstRun = true; // This is a first run!
         await this.saveConfig();
       }
       this.config['version'] = VERSION;
@@ -129,11 +153,23 @@ class ConfigManager {
         "cipher",    // Encrypt/decrypt files or wipe data
         "takeown"    // Take ownership of files
       ],
-      defaultShell: os.platform() === 'win32' ? 'powershell.exe' : '/bin/sh',
+      defaultShell: (() => {
+        if (os.platform() === 'win32') {
+          return 'powershell.exe';
+        }
+        // Use user's actual shell from environment
+        // On macOS, default to zsh (default since Catalina) since process.env.SHELL
+        // may not be set when running inside Claude Desktop
+        const fallbackShell = os.platform() === 'darwin' ? '/bin/zsh' : '/bin/sh';
+        const userShell = process.env.SHELL || fallbackShell;
+        // Return just the shell path - we'll handle login shell flag elsewhere
+        return userShell;
+      })(),
       allowedDirectories: [],
       telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
       fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
-      fileReadLineLimit: 1000  // Default line limit for file read operations (changed from character-based)
+      fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
+      pendingWelcomeOnboarding: true  // New install flag - triggers A/B test for welcome page
     };
   }
 
@@ -170,14 +206,19 @@ class ConfigManager {
    */
   async setValue(key: string, value: any): Promise<void> {
     await this.init();
+
+    if (key === 'telemetryEnabled') {
+      value = normalizeTelemetryEnabledValue(value);
+    }
     
     // Special handling for telemetry opt-out
-    if (key === 'telemetryEnabled' && value === false) {
+    if (key === 'telemetryEnabled' && isTelemetryDisabledValue(value)) {
       // Get the current value before changing it
-      const currentValue = this.config[key];
+      const currentValue: unknown = this.config[key];
+      const telemetryAlreadyDisabled = isTelemetryDisabledValue(currentValue);
       
       // Only capture the opt-out event if telemetry was previously enabled
-      if (currentValue !== false) {
+      if (!telemetryAlreadyDisabled) {
         // Import the capture function dynamically to avoid circular dependencies
         const { capture } = await import('./utils/capture.js');
         
@@ -212,6 +253,26 @@ class ConfigManager {
     this.config = this.getDefaultConfig();
     await this.saveConfig();
     return { ...this.config };
+  }
+
+  /**
+   * Check if this is the first run (config file was just created)
+   */
+  isFirstRun(): boolean {
+    return this._isFirstRun;
+  }
+
+  /**
+   * Get or create a persistent client ID for analytics and A/B tests
+   */
+  async getOrCreateClientId(): Promise<string> {
+    let clientId = await this.getValue('clientId');
+    if (!clientId) {
+      const { randomUUID } = await import('crypto');
+      clientId = randomUUID();
+      await this.setValue('clientId', clientId);
+    }
+    return clientId;
   }
 }
 

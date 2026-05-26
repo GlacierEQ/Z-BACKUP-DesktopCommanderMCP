@@ -24,6 +24,14 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
     info: typeof console.info;
   };
   private originalStdoutWrite: typeof process.stdout.write;
+  private isInitialized: boolean = false;
+  private messageBuffer: Array<{
+    level: "emergency" | "alert" | "critical" | "error" | "warning" | "notice" | "info" | "debug";
+    args: any[];
+    timestamp: number;
+  }> = [];
+  private clientName: string = 'unknown';
+  private disableNotifications: boolean = false;
 
   constructor() {
     super();
@@ -45,29 +53,136 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
     // Setup stdout filtering for any other output
     this.setupStdoutFiltering();
     
-    // Log initialization to stderr to avoid polluting the JSON stream
-    process.stderr.write(`[desktop-commander] Enhanced FilteredStdioServerTransport initialized\n`);
+    // Note: We defer the initialization notification until enableNotifications() is called
+    // to ensure MCP protocol compliance - notifications must not be sent before initialization
+  }
+
+  /**
+   * Call this method after MCP initialization is complete to enable JSON-RPC notifications
+   */
+  public enableNotifications() {
+    this.isInitialized = true;
+    
+    // Check if notifications should be disabled based on client
+    if (this.disableNotifications) {
+      // Clear buffer without sending - just log to stderr instead
+      if (this.messageBuffer.length > 0) {
+        process.stderr.write(`[INFO] ${this.messageBuffer.length} buffered messages suppressed for ${this.clientName}\n`);
+      }
+      this.messageBuffer = [];
+      return;
+    }
+    
+    // Send the deferred initialization notification first
+    this.sendLogNotification('info', ['Enhanced FilteredStdioServerTransport initialized']);
+    
+    // Replay all buffered messages in chronological order
+    if (this.messageBuffer.length > 0) {
+      this.sendLogNotification('info', [`Replaying ${this.messageBuffer.length} buffered initialization messages`]);
+      
+      this.messageBuffer
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .forEach(msg => {
+          this.sendLogNotification(msg.level, msg.args);
+        });
+      
+      // Clear the buffer
+      this.messageBuffer = [];
+    }
+    
+    this.sendLogNotification('info', ['JSON-RPC notifications enabled']);
+  }
+
+  /**
+   * Configure client-specific behavior
+   * Call this BEFORE enableNotifications()
+   */
+  public configureForClient(clientName: string) {
+    this.clientName = clientName.toLowerCase();
+    
+    // Detect Cline and disable notifications
+    if (this.clientName.includes('cline') || 
+        this.clientName.includes('vscode') ||
+        this.clientName === 'claude-dev') {
+      this.disableNotifications = true;
+      process.stderr.write(`[INFO] Desktop Commander: Notifications disabled for ${clientName}\n`);
+    }
+  }
+
+  /**
+   * Check if notifications are enabled
+   */
+  public get isNotificationsEnabled(): boolean {
+    return this.isInitialized;
+  }
+
+  /**
+   * Get the current count of buffered messages
+   */
+  public get bufferedMessageCount(): number {
+    return this.messageBuffer.length;
   }
 
   private setupConsoleRedirection() {
     console.log = (...args: any[]) => {
-      this.sendLogNotification("info", args);
+      if (this.isInitialized) {
+        this.sendLogNotification("info", args);
+      } else {
+        // Buffer for later replay to client
+        this.messageBuffer.push({
+          level: "info",
+          args,
+          timestamp: Date.now()
+        });
+      }
     };
 
     console.info = (...args: any[]) => {
-      this.sendLogNotification("info", args);
+      if (this.isInitialized) {
+        this.sendLogNotification("info", args);
+      } else {
+        this.messageBuffer.push({
+          level: "info",
+          args,
+          timestamp: Date.now()
+        });
+      }
     };
 
     console.warn = (...args: any[]) => {
-      this.sendLogNotification("warning", args);
+      if (this.isInitialized) {
+        this.sendLogNotification("warning", args);
+      } else {
+        this.messageBuffer.push({
+          level: "warning",
+          args,
+          timestamp: Date.now()
+        });
+      }
     };
 
     console.error = (...args: any[]) => {
-      this.sendLogNotification("error", args);
+      if (this.isInitialized) {
+        this.sendLogNotification("error", args);
+      } else {
+        this.messageBuffer.push({
+          level: "error",
+          args,
+          timestamp: Date.now()
+        });
+      }
     };
 
     console.debug = (...args: any[]) => {
-      this.sendLogNotification("debug", args);
+      if (this.isInitialized) {
+        this.sendLogNotification("debug", args);
+      } else {
+        this.messageBuffer.push({
+          level: "debug",
+          args,
+          timestamp: Date.now()
+        });
+      }
     };
   }
 
@@ -87,7 +202,16 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
           return this.originalStdoutWrite.call(process.stdout, buffer, encoding, callback);
         } else if (trimmed.length > 0) {
           // Non-JSON-RPC output, wrap it in a log notification
-          this.sendLogNotification("info", [buffer.replace(/\n$/, '')]);
+          if (this.isInitialized) {
+            this.sendLogNotification("info", [buffer.replace(/\n$/, '')]);
+          } else {
+            // Buffer for later replay to client
+            this.messageBuffer.push({
+              level: "info",
+              args: [buffer.replace(/\n$/, '')],
+              timestamp: Date.now()
+            });
+          }
           if (callback) callback();
           return true;
         }
@@ -99,6 +223,11 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
   }
 
   private sendLogNotification(level: "emergency" | "alert" | "critical" | "error" | "warning" | "notice" | "info" | "debug", args: any[]) {
+    // Skip if notifications are disabled (e.g., for Cline)
+    if (this.disableNotifications) {
+      return;
+    }
+    
     try {
       // For data, we can send structured data or string according to MCP spec
       let data: any;
@@ -132,15 +261,41 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
       // Send as valid JSON-RPC notification
       this.originalStdoutWrite.call(process.stdout, JSON.stringify(notification) + '\n');
     } catch (error) {
-      // Fallback to stderr if JSON serialization fails
-      process.stderr.write(`[${level.toUpperCase()}] ${args.join(' ')}\n`);
+      // Fallback to a simple JSON-RPC error notification if JSON serialization fails
+      const fallbackNotification = {
+        jsonrpc: "2.0" as const,
+        method: "notifications/message",
+        params: {
+          level: "error",
+          logger: "desktop-commander",
+          data: `Log serialization failed: ${args.join(' ')}`
+        }
+      };
+      this.originalStdoutWrite.call(process.stdout, JSON.stringify(fallbackNotification) + '\n');
     }
   }
 
   /**
    * Public method to send log notifications from anywhere in the application
+   * Now properly buffers messages before MCP initialization to avoid breaking stdio protocol
    */
   public sendLog(level: "emergency" | "alert" | "critical" | "error" | "warning" | "notice" | "info" | "debug", message: string, data?: any) {
+    // Skip if notifications are disabled (e.g., for Cline)
+    if (this.disableNotifications) {
+      return;
+    }
+    
+    // Buffer messages before initialization to avoid breaking MCP protocol
+    // MCP requires client to send first message - server cannot write to stdout before that
+    if (!this.isInitialized) {
+      this.messageBuffer.push({
+        level,
+        args: [data ? { message, ...data } : message],
+        timestamp: Date.now()
+      });
+      return;
+    }
+    
     try {
       const notification: LogNotification = {
         jsonrpc: "2.0",
@@ -154,7 +309,17 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
 
       this.originalStdoutWrite.call(process.stdout, JSON.stringify(notification) + '\n');
     } catch (error) {
-      process.stderr.write(`[${level.toUpperCase()}] ${message}\n`);
+      // Fallback to basic JSON-RPC notification
+      const fallbackNotification = {
+        jsonrpc: "2.0" as const,
+        method: "notifications/message",
+        params: {
+          level: "error",
+          logger: "desktop-commander",
+          data: `sendLog failed: ${message}`
+        }
+      };
+      this.originalStdoutWrite.call(process.stdout, JSON.stringify(fallbackNotification) + '\n');
     }
   }
 
@@ -162,6 +327,11 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
    * Send a progress notification (useful for long-running operations)
    */
   public sendProgress(token: string, value: number, total?: number) {
+    // Don't send progress before initialization - would break MCP protocol
+    if (!this.isInitialized) {
+      return;
+    }
+    
     try {
       const notification = {
         jsonrpc: "2.0" as const,
@@ -175,7 +345,17 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
       
       this.originalStdoutWrite.call(process.stdout, JSON.stringify(notification) + '\n');
     } catch (error) {
-      process.stderr.write(`[PROGRESS] ${token}: ${value}${total ? `/${total}` : ''}\n`);
+      // Fallback to basic JSON-RPC notification for progress
+      const fallbackNotification = {
+        jsonrpc: "2.0" as const,
+        method: "notifications/message",
+        params: {
+          level: "info",
+          logger: "desktop-commander",
+          data: `Progress ${token}: ${value}${total ? `/${total}` : ''}`
+        }
+      };
+      this.originalStdoutWrite.call(process.stdout, JSON.stringify(fallbackNotification) + '\n');
     }
   }
 
@@ -183,6 +363,11 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
    * Send a custom notification with any method name
    */
   public sendCustomNotification(method: string, params: any) {
+    // Don't send custom notifications before initialization - would break MCP protocol
+    if (!this.isInitialized) {
+      return;
+    }
+    
     try {
       const notification = {
         jsonrpc: "2.0" as const,
@@ -192,7 +377,17 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
       
       this.originalStdoutWrite.call(process.stdout, JSON.stringify(notification) + '\n');
     } catch (error) {
-      process.stderr.write(`[NOTIFICATION] ${method}: ${JSON.stringify(params)}\n`);
+      // Fallback to basic JSON-RPC notification for custom notifications
+      const fallbackNotification = {
+        jsonrpc: "2.0" as const,
+        method: "notifications/message",
+        params: {
+          level: "error",
+          logger: "desktop-commander",
+          data: `Custom notification failed: ${method}: ${JSON.stringify(params)}`
+        }
+      };
+      this.originalStdoutWrite.call(process.stdout, JSON.stringify(fallbackNotification) + '\n');
     }
   }
 

@@ -2,6 +2,87 @@ import { configManager, ServerConfig } from '../config-manager.js';
 import { SetConfigValueArgsSchema } from './schemas.js';
 import { getSystemInfo } from '../utils/system-info.js';
 import { currentClient } from '../server.js';
+import { featureFlagManager } from '../utils/feature-flags.js';
+import { access, readFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import {
+  CONFIG_FIELD_DEFINITIONS,
+  CONFIG_FIELD_KEYS,
+  isConfigFieldKey,
+} from '../config-field-definitions.js';
+
+const ALLOWED_CONFIG_KEYS = new Set(CONFIG_FIELD_KEYS);
+
+async function pathExists(pathValue: string): Promise<boolean> {
+  try {
+    await access(pathValue, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectAvailableShells(systemInfo: ReturnType<typeof getSystemInfo>): Promise<string[]> {
+  const detected = new Set<string>();
+  const add = (shell: string): void => {
+    if (shell.trim().length > 0) {
+      detected.add(shell.trim());
+    }
+  };
+
+  add(systemInfo.defaultShell);
+
+  if (systemInfo.isWindows) {
+    add(process.env.ComSpec ?? '');
+    const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+    const candidates = [
+      `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+      `${systemRoot}\\System32\\cmd.exe`,
+      `${systemRoot}\\System32\\bash.exe`,
+      'powershell.exe',
+      'pwsh.exe',
+      'cmd.exe',
+      'bash.exe',
+    ];
+
+    for (const shell of candidates) {
+      if (shell.includes('\\')) {
+        if (await pathExists(shell)) {
+          add(shell);
+        }
+      } else {
+        add(shell);
+      }
+    }
+
+    return [...detected];
+  }
+
+  add(process.env.SHELL ?? '');
+
+  const shellFiles = ['/etc/shells'];
+  for (const shellFile of shellFiles) {
+    try {
+      const content = await readFile(shellFile, 'utf8');
+      content
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.startsWith('#'))
+        .forEach(add);
+    } catch {
+      // Best-effort discovery only.
+    }
+  }
+
+  const fallbackCandidates = ['/bin/zsh', '/bin/bash', '/bin/sh', '/usr/bin/fish'];
+  for (const shell of fallbackCandidates) {
+    if (await pathExists(shell)) {
+      add(shell);
+    }
+  }
+
+  return [...detected];
+}
 
 /**
  * Get the entire config including system information
@@ -13,20 +94,27 @@ export async function getConfig() {
     
     // Add system information and current client to the config response
     const systemInfo = getSystemInfo();
+    
+    // Get memory usage
+    const memoryUsage = process.memoryUsage();
+    const memory = {
+      rss: `${(memoryUsage.rss / 1024 / 1024).toFixed(2)} MB`,
+      heapTotal: `${(memoryUsage.heapTotal / 1024 / 1024).toFixed(2)} MB`,
+      heapUsed: `${(memoryUsage.heapUsed / 1024 / 1024).toFixed(2)} MB`,
+      external: `${(memoryUsage.external / 1024 / 1024).toFixed(2)} MB`,
+      arrayBuffers: `${(memoryUsage.arrayBuffers / 1024 / 1024).toFixed(2)} MB`
+    };
+    
     const configWithSystemInfo = {
       ...config,
       currentClient,
+      featureFlags: featureFlagManager.getAll(),
       systemInfo: {
-        platform: systemInfo.platform,
-        platformName: systemInfo.platformName,
-        defaultShell: systemInfo.defaultShell,
-        pathSeparator: systemInfo.pathSeparator,
-        isWindows: systemInfo.isWindows,
-        isMacOS: systemInfo.isMacOS,
-        isLinux: systemInfo.isLinux,
-        examplePaths: systemInfo.examplePaths
+        ...systemInfo,
+        memory
       }
     };
+    const availableShells = await detectAvailableShells(systemInfo);
     
     console.error(`getConfig result: ${JSON.stringify(configWithSystemInfo, null, 2)}`);
     return {
@@ -34,6 +122,22 @@ export async function getConfig() {
         type: "text",
         text: `Current configuration:\n${JSON.stringify(configWithSystemInfo, null, 2)}`
       }],
+      structuredContent: {
+        config: configWithSystemInfo,
+        uiHints: {
+          availableShells,
+        },
+        entries: CONFIG_FIELD_KEYS.map((key) => {
+          const definition = CONFIG_FIELD_DEFINITIONS[key];
+          const value = (configWithSystemInfo as Record<string, unknown>)[key];
+          return {
+            key,
+            value,
+            valueType: definition.valueType,
+            editable: true,
+          };
+        }),
+      },
     };
   } catch (error) {
     console.error(`Error in getConfig: ${error instanceof Error ? error.message : String(error)}`);
@@ -66,7 +170,18 @@ export async function setConfigValue(args: unknown) {
       };
     }
 
+    if (!isConfigFieldKey(parsed.data.key)) {
+      return {
+        content: [{
+          type: "text",
+          text: `Key "${parsed.data.key}" is not configurable via this tool. Allowed keys: ${[...ALLOWED_CONFIG_KEYS].join(', ')}`
+        }],
+        isError: true
+      };
+    }
+
     try {
+      const fieldDefinition = CONFIG_FIELD_DEFINITIONS[parsed.data.key];
       // Parse string values that should be arrays or objects
       let valueToStore = parsed.data.value;
       
@@ -82,27 +197,50 @@ export async function setConfigValue(args: unknown) {
       }
 
       // Special handling for known array configuration keys
-      if ((parsed.data.key === 'allowedDirectories' || parsed.data.key === 'blockedCommands') && 
-          !Array.isArray(valueToStore)) {
+      if (fieldDefinition.valueType === 'array' && !Array.isArray(valueToStore)) {
         if (typeof valueToStore === 'string') {
+          const originalString = valueToStore;
           try {
-            valueToStore = JSON.parse(valueToStore);
+            const parsedValue = JSON.parse(originalString);
+            valueToStore = parsedValue;
           } catch (parseError) {
             console.error(`Failed to parse string as array for ${parsed.data.key}: ${parseError}`);
             // If parsing failed and it's a single value, convert to an array with one item
-            if (!valueToStore.includes('[')) {
-              valueToStore = [valueToStore];
+            if (!originalString.includes('[')) {
+              valueToStore = [originalString];
             }
           }
-        } else {
-          // If not a string or array, convert to an array with one item
-          valueToStore = [valueToStore];
+        } else if (valueToStore !== null) {
+          // If not a string or array (and not null), convert to an array with one item
+          valueToStore = [String(valueToStore)];
         }
         
         // Ensure the value is an array after all our conversions
         if (!Array.isArray(valueToStore)) {
           console.error(`Value for ${parsed.data.key} is still not an array, converting to array`);
           valueToStore = [String(valueToStore)];
+        }
+      }
+
+      // Harden boolean fields against stringly-typed inputs like "false".
+      if (fieldDefinition.valueType === 'boolean') {
+        if (typeof valueToStore === 'string') {
+          const normalized = valueToStore.trim().toLowerCase();
+          if (normalized === 'true') {
+            valueToStore = true;
+          } else if (normalized === 'false') {
+            valueToStore = false;
+          }
+        }
+
+        if (typeof valueToStore !== 'boolean') {
+          return {
+            content: [{
+              type: "text",
+              text: `Value for ${parsed.data.key} must be boolean true/false.`
+            }],
+            isError: true
+          };
         }
       }
 

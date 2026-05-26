@@ -1,13 +1,33 @@
+/**
+ * Text file editing via search/replace with fuzzy matching support.
+ *
+ * TECHNICAL DEBT / ARCHITECTURAL NOTE:
+ * This file contains text editing logic that should ideally live in TextFileHandler.editRange()
+ * to be consistent with how Excel editing works (ExcelFileHandler.editRange()).
+ *
+ * Current inconsistency:
+ * - Excel: edit_block → ExcelFileHandler.editRange() ✓ uses file handler
+ * - Text:  edit_block → performSearchReplace() here → bypasses TextFileHandler
+ *
+ * Future refactor should:
+ * 1. Move performSearchReplace() + fuzzy logic into TextFileHandler.editRange()
+ * 2. Make this file a thin dispatch layer that routes to appropriate FileHandler
+ * 3. Unify the editRange() signature to handle both text search/replace and structured edits
+ */
+
 import { readFile, writeFile, readFileInternal, validatePath } from './filesystem.js';
 import fs from 'fs/promises';
 import { ServerResult } from '../types.js';
 import { recursiveFuzzyIndexOf, getSimilarityRatio } from './fuzzySearch.js';
 import { capture } from '../utils/capture.js';
+import { createErrorResponse } from '../error-handlers.js';
 import { EditBlockArgsSchema } from "./schemas.js";
 import path from 'path';
 import { detectLineEnding, normalizeLineEndings } from '../utils/lineEndingHandler.js';
 import { configManager } from '../config-manager.js';
 import { fuzzySearchLogger, type FuzzySearchLogEntry } from '../utils/fuzzySearchLogger.js';
+import { resolvePreviewFileType } from '../ui/file-preview/shared/preview-file-types.js';
+import { resolveAbsolutePath } from '../handlers/filesystem-handlers.js';
 
 interface SearchReplace {
     search: string;
@@ -182,11 +202,32 @@ RECOMMENDATION: For large search/replace operations, consider breaking them into
         
         await writeFile(filePath, newContent);
         capture('server_edit_block_exact_success', {fileExtension: fileExtension, expectedReplacements, hasWarning: warningMessage !== ""});
+        const resolvedEditPath = resolveAbsolutePath(filePath);
+
+        // Show a partial preview centered on the edited area
+        const newLines = newContent.split('\n');
+        const totalLines = newLines.length;
+        const changePos = content.indexOf(normalizedSearch);
+        const changeStartLine = changePos >= 0 ? newContent.substring(0, changePos).split('\n').length - 1 : 0;
+        const changeLineCount = block.replace.split('\n').length;
+        const contextLines = 10;
+        const previewStart = Math.max(0, changeStartLine - contextLines);
+        const previewEnd = Math.min(totalLines, changeStartLine + changeLineCount + contextLines);
+        const previewContent = newLines.slice(previewStart, previewEnd).join('\n');
+        const previewLineCount = previewEnd - previewStart;
+        const remaining = totalLines - previewEnd;
+        const statusLine = `[Reading ${previewLineCount} lines from ${previewStart === 0 ? 'start' : `line ${previewStart}`} (total: ${totalLines} lines, ${remaining} remaining)]\n\n`;
+
         return {
-            content: [{ 
-                type: "text", 
-                text: `Successfully applied ${expectedReplacements} edit${expectedReplacements > 1 ? 's' : ''} to ${filePath}${warningMessage}` 
+            content: [{
+                type: "text",
+                text: `${statusLine}${previewContent}`
             }],
+            structuredContent: {
+                fileName: path.basename(resolvedEditPath),
+                filePath: resolvedEditPath,
+                fileType: resolvePreviewFileType(resolvedEditPath),
+            },
         };
     }
     
@@ -337,18 +378,118 @@ function highlightDifferences(expected: string, actual: string): string {
 }
 
 /**
- * Handle edit_block command with enhanced functionality
- * - Supports multiple replacements
- * - Validates expected replacements count
- * - Provides detailed error messages
+ * Handle edit_block command
+ *
+ * 1. Text files: String replacement (old_string/new_string)
+ *    - Uses fuzzy matching for resilience
+ *    - Handles expected_replacements parameter
+ *
+ * 2. Structured files (Excel): Range rewrite (range + content)
+ *    - Bulk updates to cell ranges (e.g., "Sheet1!A1:C10")
+ *    - Whole sheet replacement (e.g., "Sheet1")
+ *    - More powerful and simpler than surgical location-based edits
+ *    - Supports chunking for large datasets (e.g., 1000 rows at a time)
+
  */
 export async function handleEditBlock(args: unknown): Promise<ServerResult> {
     const parsed = EditBlockArgsSchema.parse(args);
-    
-    const searchReplace = {
+
+    // Note: Check for truthy range to handle empty strings from AI clients that send all optional params
+    const hasRange = parsed.range !== undefined && parsed.range !== '';
+    const hasContent = parsed.content !== undefined && parsed.content !== '';
+
+    // Validate path and resolve handler once — used by both dispatch paths below
+    let validatedPath: string;
+    let handler: Awaited<ReturnType<typeof import('../utils/files/factory.js').getFileHandler>>;
+    try {
+        validatedPath = await validatePath(parsed.file_path);
+        const { getFileHandler } = await import('../utils/files/factory.js');
+        handler = await getFileHandler(validatedPath);
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return createErrorResponse(errorMessage);
+    }
+
+    const hasEditRange = 'editRange' in handler && typeof handler.editRange === 'function';
+
+    // Path 1: Range rewrite (Excel, etc.) — range + content
+    if (hasRange && hasContent) {
+        // Parse content if it's a JSON string (AI often sends arrays as JSON strings)
+        let content = parsed.content;
+        if (typeof content === 'string') {
+            try {
+                content = JSON.parse(content);
+            } catch {
+                // Leave as-is if not valid JSON - let handler decide
+            }
+        }
+
+        if (hasEditRange) {
+            try {
+                // parsed.range is guaranteed non-empty string by hasRange check above
+                await handler.editRange!(validatedPath!, parsed.range!, content, parsed.options);
+                const resolvedRangePath = resolveAbsolutePath(parsed.file_path);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Successfully updated range ${parsed.range} in ${parsed.file_path}`
+                    }],
+                    structuredContent: {
+                        fileName: path.basename(resolvedRangePath),
+                        filePath: resolvedRangePath,
+                        fileType: resolvePreviewFileType(resolvedRangePath),
+                    },
+                };
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                return createErrorResponse(errorMessage);
+            }
+        }
+
+        return createErrorResponse(`Range-based editing not supported for ${parsed.file_path}. For text files, use old_string and new_string parameters instead. If your client requires range/content parameters, set them to empty strings ("").`);
+    }
+
+    // Path 2: Text replacement — old_string + new_string
+    if (parsed.old_string === undefined || parsed.new_string === undefined) {
+        return createErrorResponse(`Text replacement requires both old_string and new_string parameters`);
+    }
+
+    // If the handler implements editRange it owns text-replacement for its file type
+    // (e.g. DocxFileHandler does find/replace on pretty-printed XML rather than raw bytes).
+    // Plain text files fall through to performSearchReplace.
+    if (hasEditRange) {
+        try {
+            const result = await handler.editRange!(validatedPath!, '', {
+                old_string: parsed.old_string,
+                new_string: parsed.new_string,
+                expected_replacements: parsed.expected_replacements,
+            });
+
+            if (result.success) {
+                const resolvedEditRangePath = resolveAbsolutePath(parsed.file_path);
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Successfully applied ${result.editsApplied} edit(s) to ${parsed.file_path}`
+                    }],
+                    structuredContent: {
+                        fileName: path.basename(resolvedEditRangePath),
+                        filePath: resolvedEditRangePath,
+                        fileType: resolvePreviewFileType(resolvedEditRangePath),
+                    },
+                };
+            }
+
+            const errorMsg = result.errors?.map(e => e.error).join('; ') || 'Unknown error';
+            return createErrorResponse(errorMsg);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            return createErrorResponse(errorMessage);
+        }
+    }
+
+    return performSearchReplace(parsed.file_path, {
         search: parsed.old_string,
         replace: parsed.new_string
-    };
-
-    return performSearchReplace(parsed.file_path, searchReplace, parsed.expected_replacements);
+    }, parsed.expected_replacements);
 }

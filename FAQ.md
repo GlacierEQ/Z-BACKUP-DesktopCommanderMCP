@@ -22,6 +22,7 @@ This document provides answers to the most commonly asked questions about Claude
   - [How do I install Claude Desktop Commander?](#how-do-i-install-claude-desktop-commander)
   - [How do I update to the latest version?](#how-do-i-update-to-the-latest-version)
   - [Which operating systems does it support?](#which-operating-systems-does-it-support)
+  - [How do I get started after installing Desktop Commander?](#how-do-i-get-started-after-installing-desktop-commander)
 
 - [Features & Capabilities](#features--capabilities)
   - [What can I do with Claude Desktop Commander?](#what-can-i-do-with-claude-desktop-commander)
@@ -141,7 +142,7 @@ Add the MCP server to your claude_desktop_config.json (on Mac, found at ~/Librar
       "command": "npx",
       "args": [
         "-y",
-        "@wonderwhy-er/desktop-commander"
+        "@wonderwhy-er/desktop-commander@latest"
       ]
     }
   }
@@ -171,6 +172,24 @@ Claude Desktop Commander works with:
 - Linux (with ongoing enhancements for various distributions)
 
 Work is in progress to improve WSL (Windows Subsystem for Linux) integration and add SSH support for remote servers.
+
+### How do I get started after installing Desktop Commander?
+
+After installation, Desktop Commander includes intelligent onboarding to help new users discover its capabilities:
+
+**Automatic Onboarding:** When you're a new user (fewer than 10 successful commands), Claude will automatically offer helpful getting-started guidance and tutorials after you use Desktop Commander successfully.
+
+**Manual Onboarding:** You can also request onboarding help at any time by simply asking Claude:
+- "Help me get started with Desktop Commander"
+- "Show me Desktop Commander examples"
+- "What can I do with Desktop Commander?"
+
+**Starter Examples:** Claude will show you beginner-friendly tutorials like:
+- Organizing your Downloads folder
+- Analyzing CSV files
+- Setting up GitHub Actions
+- Exploring codebases
+- And more hands-on examples
 
 ## Features & Capabilities
 
@@ -268,10 +287,10 @@ Claude Desktop Commander has a sophisticated system for managing commands and op
 4. You can use `force_terminate` to stop the command if needed
 
 For search operations:
-1. Both `search_files` and `search_code` have a default 30-second timeout
-2. This prevents searches from hanging indefinitely on large codebases
-3. You can customize the timeout duration with the `timeoutMs` parameter
-4. If a search times out, you'll receive a clear message indicating the timeout
+1. `start_search` begins a streaming search and returns immediately with a session ID
+2. `get_more_search_results` retrieves results progressively with pagination support
+3. `stop_search` allows you to cancel long-running searches
+4. Search sessions auto-cleanup after 5 minutes if not stopped manually
 
 This allows Claude to manage processes that would normally exceed conversation timeouts, such as video encoding, large file operations, complex builds, or extensive searches.
 
@@ -372,21 +391,29 @@ We welcome feedback from users who try Desktop Commander with other MCP clients 
 
 ## Security & Permissions
 
+> **Important**: For current security limitations and vulnerability reporting, see our [Security Policy](SECURITY.md).
+
 ### Is it safe to give Claude access to my file system?
 
-Claude Desktop Commander operates within certain safety boundaries:
+Claude Desktop Commander has known security limitations:
 
-- While file restrictions are currently disabled, Claude typically only works with files in folders you specifically direct it to
+- Directory restrictions can be bypassed via symlinks and terminal commands
+- Command blocking can be bypassed via command substitution and absolute paths  
 - Claude can only perform actions that your user account has permission to do
-- No data is sent to external servers beyond what you share in Claude conversations
 
-> **Note:** Command blocking features are still in development. You should always review the actions Claude proposes before allowing it to make system changes, especially when working with important files or system configurations.
+> **For production use requiring security**: Use the [Docker installation](#option-6-docker-installation-🐳-⭐-auto-updates-no-nodejs-required) with selective folder mounting for complete isolation from your host system.
 
 ### Can I control which directories Claude can access?
 
-Recent updates have removed path limitations, and work is in progress to add configuration options that will allow you to specify which directories the tool can access. This feature is being developed in [PR #16](https://github.com/wonderwhy-er/ClaudeDesktopCommander/pull/16).
+Directory access controls exist but have known bypass vulnerabilities. For secure usage, we recommend the Docker installation which provides complete isolation with controlled folder mounting.
 
 ### What commands are blocked by default?
+
+Command blocking exists but can be bypassed through various methods. The current system blocks dangerous commands like `rm`, `sudo`, `format`, etc., but these restrictions can be circumvented.
+
+### How do I report security vulnerabilities?
+
+Please create a [GitHub Issue](https://github.com/wonderwhy-er/DesktopCommanderMCP/issues) with detailed information about any security vulnerabilities you discover. See our [Security Policy](SECURITY.md) for full guidelines.
 
 Claude Desktop Commander doesn't have a pre-defined blocklist, but you can use the `block_command` and `unblock_command` functions to manage which commands Claude can execute. It's recommended to block commands that could potentially be destructive, such as `rm -rf` or `format`.
 

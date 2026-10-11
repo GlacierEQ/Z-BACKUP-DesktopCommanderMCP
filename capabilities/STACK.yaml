@@ -1,0 +1,11 @@
+schema_version: 1
+id: repo_stack
+purpose: Orchestration
+objective:
+  desired_reality: repo fully validated and APEX‑verified
+layers:
+  execution: heavy
+  verification: epistemic
+mission_impact: 5
+verification:
+  acceptance: true

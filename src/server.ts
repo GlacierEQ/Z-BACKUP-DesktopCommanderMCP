@@ -51,6 +51,11 @@ import {
     GetPromptsArgsSchema,
     GetRecentToolCallsArgsSchema,
     WritePdfArgsSchema,
+    FoundationStatusArgsSchema,
+    ModelHealthArgsSchema,
+    HindsightStatusArgsSchema,
+    ConstitutionCheckArgsSchema,
+    FoundationAssertArgsSchema,
     toolArgSchemas,
 } from './tools/schemas.js';
 import {
@@ -1182,6 +1187,52 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     title: "Get Prompts",
                     readOnlyHint: true,
                 },
+            },
+            {
+                name: "foundation_status",
+                description: `Probe the operator's foundation stack health — Hindsight status, Postgres, launchd services, model routing and constitution integrity. Read-only: single MCP call to discover system-wide state, without leaving the terminal.`,
+                inputSchema: zodToJsonSchema(FoundationStatusArgsSchema),
+                _meta: buildUiToolMeta(CONFIG_EDITOR_RESOURCE_URI, true, showMcpUiPreviews),
+                annotations: {
+                    title: "Foundation Status",
+                    readOnlyHint: true,
+                },
+            },
+            {
+                name: "model_health",
+                description: `Read the live model health registry — which LLM selectors are OK/flaky/rate-limited, with latencies, ranked best-first. Read-only: returns the most recent probe of every configured provider.`,
+                inputSchema: zodToJsonSchema(ModelHealthArgsSchema),
+                annotations: {
+                    title: "Model Health",
+                    readOnlyHint: true,
+                },
+            },
+            {
+                name: "hindsight_status",
+                description: `Probe the Hindsight memory API in depth — /health endpoint response including database connectivity, connection pool state, embeddings engine and reranker mode. Read-only.`,
+                inputSchema: zodToJsonSchema(HindsightStatusArgsSchema),
+                annotations: {
+                    title: "Hindsight Status",
+                    readOnlyHint: true,
+                },
+            },
+            {
+                name: "constitution_check",
+                description: `Verify integrity of the operator constitution (RULES.md, AGENTS.md and companions) via sha256 checksum manifest. Read-only: reports VERIFIED or which files failed checksum.`,
+                inputSchema: zodToJsonSchema(ConstitutionCheckArgsSchema),
+                annotations: {
+                    title: "Constitution Check",
+                    readOnlyHint: true,
+                },
+            },
+            {
+                name: "foundation_assert",
+                description: `Evaluate a declarative claim against live state and return PASS/FAIL/UNVERIFIED with evidence. Three claim types: file_contains (target+pattern), config_subset (target+key+allowed[] — every value must be in the allowed set), checksum_verify (target manifest). Independent read-back gate: use before any completion claim. Never silent.`,
+                inputSchema: zodToJsonSchema(FoundationAssertArgsSchema),
+                annotations: {
+                    title: "Foundation Assert",
+                    readOnlyHint: true,
+                },
             }
         ];
 
@@ -1280,6 +1331,61 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
 
         switch (name) {
             // Config tools
+            case "foundation_status":
+                try {
+                    result = await handlers.handleFoundationStatus(args ?? {});
+                } catch (error) {
+                    capture('server_request_error', { message: `Error in foundation_status handler: ${error}` });
+                    result = {
+                        content: [{ type: "text", text: `Error: Failed to probe foundation status` }],
+                        isError: true,
+                    };
+                }
+                break;
+            case "model_health":
+                try {
+                    result = await handlers.handleModelHealth(args ?? {});
+                } catch (error) {
+                    capture('server_request_error', { message: `Error in model_health handler: ${error}` });
+                    result = {
+                        content: [{ type: "text", text: `Error: Failed to read model health registry` }],
+                        isError: true,
+                    };
+                }
+                break;
+            case "hindsight_status":
+                try {
+                    result = await handlers.handleHindsightStatus(args ?? {});
+                } catch (error) {
+                    capture('server_request_error', { message: `Error in hindsight_status handler: ${error}` });
+                    result = {
+                        content: [{ type: "text", text: `Error: Failed to probe Hindsight` }],
+                        isError: true,
+                    };
+                }
+                break;
+            case "constitution_check":
+                try {
+                    result = await handlers.handleConstitutionCheck(args ?? {});
+                } catch (error) {
+                    capture('server_request_error', { message: `Error in constitution_check handler: ${error}` });
+                    result = {
+                        content: [{ type: "text", text: `Error: Failed to verify constitution` }],
+                        isError: true,
+                    };
+                }
+                break;
+            case "foundation_assert":
+                try {
+                    result = await handlers.handleFoundationAssert(args ?? {});
+                } catch (error) {
+                    capture('server_request_error', { message: `Error in foundation_assert handler: ${error}` });
+                    result = {
+                        content: [{ type: "text", text: `Error: foundation_assert failed: ${error instanceof Error ? error.message : String(error)}` }],
+                        isError: true,
+                    };
+                }
+                break;
             case "get_config":
                 try {
                     result = await getConfig();

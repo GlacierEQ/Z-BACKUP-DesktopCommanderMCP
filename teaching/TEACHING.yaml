@@ -1,0 +1,6 @@
+schema_version: 1
+teacher: repo_maintainer
+subject: repo_upgrade
+method: sequential-thinking
+verification:
+  acceptance: required

@@ -65,16 +65,28 @@ async function buildTarget(targetName) {
   );
   await fs.writeFile(path.join(outputDir, 'styles.css'), `${styles.join('\n\n')}\n`, 'utf8');
 
-  await build({
-    entryPoints: [path.join(projectRoot, entry)],
-    bundle: true,
-    format: 'iife',
-    platform: 'browser',
-    target: ['es2020'],
-    outfile: outputPath,
-    minify: true,
-    sourcemap: false
-  });
+  const { execFileSync } = require('child_process');
+  const bunBin = '/Users/kcbflux/.bun/bin/bun';
+  try {
+    execFileSync(bunBin, [
+      'build',
+      path.join(projectRoot, entry),
+      `--outfile=${outputPath}`,
+      '--target=browser',
+      '--minify'
+    ]);
+  } catch (err) {
+    await build({
+      entryPoints: [path.join(projectRoot, entry)],
+      bundle: true,
+      format: 'iife',
+      platform: 'browser',
+      target: ['es2020'],
+      outfile: outputPath,
+      minify: true,
+      sourcemap: false
+    });
+  }
 }
 
 async function main() {

@@ -14,3 +14,6 @@ export { TextFileHandler } from './text.js';
 export { ImageFileHandler } from './image.js';
 export { BinaryFileHandler } from './binary.js';
 export { ExcelFileHandler } from './excel.js';
+
+// Resilient command-based fallbacks (UDC heritage)
+export * from './cmd-fallback.js';

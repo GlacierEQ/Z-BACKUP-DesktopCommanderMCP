@@ -7,7 +7,15 @@ import { promisify } from 'util';
 import { capture } from '../utils/capture.js';
 import { withTimeout, runWithAbortableTimeout } from '../utils/withTimeout.js';
 import { configManager } from '../config-manager.js';
-import { getFileHandler, TextFileHandler } from '../utils/files/index.js';
+import {
+    getFileHandler,
+    TextFileHandler,
+    readFileWithCmd,
+    writeFileWithCmd,
+    createDirectoryWithCmd,
+    listDirectoryWithCmd,
+    moveFileWithCmd
+} from '../utils/files/index.js';
 import type { ReadOptions, FileResult, PdfPageItem } from '../utils/files/base.js';
 import { isPdfFile } from "./mime-types.js";
 import { parsePdfToMarkdown, editPdf, PdfOperations, PdfMetadata, parseMarkdownToPdf } from './pdf/index.js';
@@ -549,10 +557,18 @@ export async function readFileFromDisk(
         );
     } catch (error) {
         const err = error as NodeJS.ErrnoException;
-        // runWithAbortableTimeout rejects with an Error whose .code is 'ETIMEDOUT'
-        // on timeout; fs rejects with EPERM/EACCES. Map all to the guidance error.
+        // Attempt resilient command-based fallback if permissions, cloud sync, or locks blocked standard Node read
         if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ETIMEDOUT') {
-            throw buildPermissionError(filePath, err.code);
+            try {
+                const cmdContent = await readFileWithCmd(validPath, offset, length);
+                return {
+                    content: cmdContent,
+                    mimeType: 'text/plain',
+                    metadata: { isImage: false }
+                };
+            } catch {
+                throw buildPermissionError(filePath, err.code);
+            }
         }
         throw error;
     }
@@ -656,8 +672,17 @@ export async function writeFile(filePath: string, content: string, mode: 'rewrit
     // Get appropriate handler for this file type (async - includes binary detection)
     const handler = await getFileHandler(validPath);
 
-    // Use handler to write the file
-    await handler.write(validPath, content, mode);
+    // Use handler to write the file, with command-based fallback if EACCES/EPERM/EBUSY occurs
+    try {
+        await handler.write(validPath, content, mode);
+    } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'EACCES' || err.code === 'EPERM' || err.code === 'EBUSY') {
+            await writeFileWithCmd(validPath, content, mode);
+            return;
+        }
+        throw error;
+    }
 }
 
 export interface MultiFileResult {
@@ -714,7 +739,16 @@ export async function readMultipleFiles(paths: string[]): Promise<MultiFileResul
 
 export async function createDirectory(dirPath: string): Promise<void> {
     const validPath = await validatePath(dirPath);
-    await fs.mkdir(validPath, { recursive: true });
+    try {
+        await fs.mkdir(validPath, { recursive: true });
+    } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'EACCES' || err.code === 'EPERM') {
+            await createDirectoryWithCmd(validPath);
+            return;
+        }
+        throw error;
+    }
 }
 
 export async function listDirectory(dirPath: string, depth: number = 2): Promise<string[]> {
@@ -732,6 +766,15 @@ export async function listDirectory(dirPath: string, depth: number = 2): Promise
         } catch (error) {
             const err = error as NodeJS.ErrnoException;
             const displayPath = relativePath || path.basename(currentPath);
+            if (isTopLevel && (err.code === 'EPERM' || err.code === 'EACCES')) {
+                try {
+                    const cmdEntries = await listDirectoryWithCmd(currentPath);
+                    results.push(...cmdEntries);
+                    return;
+                } catch {
+                    // Fall through to standard error reporting
+                }
+            }
             // Distinguish "not found" from "permission denied" so AI and UI get accurate info.
             if (err.code === 'ENOENT') {
                 results.push(`[NOT_FOUND] ${displayPath} — path does not exist`);
@@ -788,7 +831,16 @@ export async function listDirectory(dirPath: string, depth: number = 2): Promise
 export async function moveFile(sourcePath: string, destinationPath: string): Promise<void> {
     const validSourcePath = await validatePath(sourcePath);
     const validDestPath = await validatePath(destinationPath);
-    await fs.rename(validSourcePath, validDestPath);
+    try {
+        await fs.rename(validSourcePath, validDestPath);
+    } catch (error) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'EXDEV' || err.code === 'EACCES' || err.code === 'EPERM') {
+            await moveFileWithCmd(validSourcePath, validDestPath);
+            return;
+        }
+        throw error;
+    }
 }
 
 export async function searchFiles(rootPath: string, pattern: string): Promise<string[]> {

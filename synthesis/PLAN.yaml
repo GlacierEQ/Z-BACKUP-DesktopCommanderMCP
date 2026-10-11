@@ -1,0 +1,6 @@
+# Synthesis Plan
+
+This is a stub synthesis plan for Genius-Mastery validation.
+- Goal: upgrade repo.
+- Method: APEX mega‑pipeline.
+- Verification: genius validate + receipt.

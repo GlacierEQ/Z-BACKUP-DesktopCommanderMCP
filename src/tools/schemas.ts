@@ -242,6 +242,37 @@ export const TrackUiEventArgsSchema = z.object({
 });
 
 /**
+ * Schema for the foundation_status tool, probing operator foundation stack health.
+ * Read-only: returns Hindsight status, Postgres, launchd services, model routing, and constitution integrity.
+ */
+
+export const FoundationStatusArgsSchema = z.object({});
+
+/**
+ * Schemas for the foundation-connected diagnostic tools.
+ * All read-only, zero-argument probes over the operator foundation stack.
+ */
+export const ModelHealthArgsSchema = z.object({});
+export const HindsightStatusArgsSchema = z.object({});
+export const ConstitutionCheckArgsSchema = z.object({});
+
+/**
+ * foundation_assert — declarative claims observed through a code path
+ * independent of whatever wrote the state. Three claim types:
+ *   file_contains     target + pattern      (literal or /regex/ match)
+ *   config_subset     target + key + allowed (every value of key ∈ allowed)
+ *   checksum_verify   target                (shasum -a 256 -c manifest)
+ * Returns PASS/FAIL/UNVERIFIED with evidence — never silent.
+ */
+export const FoundationAssertArgsSchema = z.object({
+  type: z.enum(["file_contains", "config_subset", "checksum_verify"]),
+  target: z.string().min(1, "target file path required"),
+  pattern: z.string().optional(),
+  key: z.string().optional(),
+  allowed: z.array(z.string()).optional(),
+});
+
+/**
  * Map of tool name -> argument schema, used by the dispatcher to detect and warn
  * about parameters a caller sent that the tool does not support. Keep in sync
  * with the tool definitions in server.ts.
@@ -274,4 +305,9 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   give_feedback_to_desktop_commander: GiveFeedbackArgsSchema,
   get_prompts: GetPromptsArgsSchema,
   track_ui_event: TrackUiEventArgsSchema,
+  foundation_status: FoundationStatusArgsSchema,
+  model_health: ModelHealthArgsSchema,
+  hindsight_status: HindsightStatusArgsSchema,
+  constitution_check: ConstitutionCheckArgsSchema,
+  foundation_assert: FoundationAssertArgsSchema,
 };
